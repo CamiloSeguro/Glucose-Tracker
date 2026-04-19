@@ -1,0 +1,22 @@
+# Credenciales y token cache
+.env
+**/.env
+**/.llu_token_cache.json
+
+# Build artifacts
+build/
+dist/
+*.spec
+*.pkg
+*.pyz
+
+# Bytecode
+__pycache__/
+*.pyc
+
+# Logs
+logs/
+*.log
+
+# Ejecutable compilado (se genera con build.bat)
+com.cgm.freestyle.sdPlugin/main.exe

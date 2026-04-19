@@ -1,0 +1,32 @@
+{
+  "Name": "CGM FreeStyle",
+  "Version": "1.0.0",
+  "Author": "Camilo",
+  "Description": "Muestra la glucosa en tiempo real desde tu sensor FreeStyle Libre 2 Plus via LibreLinkUp.",
+  "Icon": "static/img/icon",
+  "CategoryIcon": "static/img/icon",
+  "Category": "Salud",
+  "CodePath": "main.exe",
+  "SDKVersion": 1,
+  "OS": [{ "Platform": "windows", "MinimumVersion": "10" }],
+  "Actions": [
+    {
+      "UUID": "com.cgm.freestyle.glucose",
+      "Name": "Glucosa",
+      "Tooltip": "Muestra tu nivel de glucosa actual con tendencia",
+      "Icon": "static/img/icon",
+      "state": 0,
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "Controllers": ["Keypad"],
+      "States": [
+        {
+          "Image": "static/img/icon",
+          "TitleAlignment": "bottom",
+          "FontSize": "14"
+        }
+      ],
+      "Settings": {}
+    }
+  ]
+}

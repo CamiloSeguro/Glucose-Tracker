@@ -14,17 +14,21 @@ LOW_THRESHOLD  = 70
 HIGH_THRESHOLD = 180
 
 # Colors (R, G, B)
-COLOR_LOW    = (220, 50,  50)   # red
-COLOR_HIGH   = (230, 160, 30)   # amber
-COLOR_NORMAL = (40,  170, 80)   # green
-COLOR_BG     = (20,  20,  20)   # dark background
+COLOR_LOW    = (220, 60,  60)   # red
+COLOR_HIGH   = (230, 160, 20)   # amber
+COLOR_NORMAL = (50,  190, 90)   # green
+COLOR_BG     = (15,  15,  15)   # near-black background
+COLOR_TEXT   = (240, 240, 240)  # off-white
+COLOR_DIM    = (120, 120, 120)  # muted gray
 
 POLL_INTERVAL_MS = 60_000  # 60 s
+
+SIZE = 144  # render 2x, downscale for crisp result
 
 
 def _glucose_color(value: int | None, is_low: bool, is_high: bool) -> tuple:
     if value is None:
-        return COLOR_BG
+        return COLOR_DIM
     if is_low or value < LOW_THRESHOLD:
         return COLOR_LOW
     if is_high or value > HIGH_THRESHOLD:
@@ -32,21 +36,34 @@ def _glucose_color(value: int | None, is_low: bool, is_high: bool) -> tuple:
     return COLOR_NORMAL
 
 
+def _darken(color: tuple, factor: float = 0.35) -> tuple:
+    return tuple(int(c * factor) for c in color)
+
+
 def _make_button_image(value: int | None, trend_arrow: str, color: tuple) -> str:
-    """Generate a 72x72 PNG and return it as a base64 data-URL."""
-    size = 72
-    img  = Image.new("RGB", (size, size), color=COLOR_BG)
+    """Dark background + colored ring with glow, crisp 2x render."""
+    S  = SIZE
+    cx = S // 2
+
+    img  = Image.new("RGB", (S, S), color=COLOR_BG)
     draw = ImageDraw.Draw(img)
 
-    # Colored top bar (shows range at a glance)
-    draw.rectangle([0, 0, size, 10], fill=color)
-    draw.rectangle([0, size - 10, size, size], fill=color)
+    # ── Outer glow ring (wide, very dim) ─────────────────────────────
+    glow = _darken(color, 0.25)
+    draw.ellipse([6, 6, S - 6, S - 6], outline=glow, width=14)
 
-    # Try to load a system font; fall back to PIL default
+    # ── Main colored ring ─────────────────────────────────────────────
+    draw.ellipse([14, 14, S - 14, S - 14], outline=color, width=10)
+
+    # ── Inner accent ring (thinner, slightly dim) ─────────────────────
+    inner = _darken(color, 0.55)
+    draw.ellipse([26, 26, S - 26, S - 26], outline=inner, width=3)
+
+    # ── Fonts ─────────────────────────────────────────────────────────
     try:
-        font_value = ImageFont.truetype("arialbd.ttf", 26)
-        font_unit  = ImageFont.truetype("arial.ttf",   10)
-        font_arrow = ImageFont.truetype("arial.ttf",   18)
+        font_value = ImageFont.truetype("arialbd.ttf", 44)
+        font_unit  = ImageFont.truetype("arial.ttf",   15)
+        font_arrow = ImageFont.truetype("arialbd.ttf", 22)
     except OSError:
         font_value = ImageFont.load_default()
         font_unit  = font_value
@@ -54,12 +71,17 @@ def _make_button_image(value: int | None, trend_arrow: str, color: tuple) -> str
 
     value_text = str(value) if value is not None else "---"
 
-    # Glucose value
-    draw.text((size // 2, 22), value_text, font=font_value, fill="white", anchor="mm")
-    # Unit
-    draw.text((size // 2, 42), "mg/dL", font=font_unit, fill=(180, 180, 180), anchor="mm")
-    # Trend arrow
-    draw.text((size // 2, 57), trend_arrow, font=font_arrow, fill=color, anchor="mm")
+    # ── Glucose number ────────────────────────────────────────────────
+    draw.text((cx, 54), value_text, font=font_value, fill=COLOR_TEXT, anchor="mm")
+
+    # ── Unit label ────────────────────────────────────────────────────
+    draw.text((cx, 78), "mg/dL", font=font_unit, fill=COLOR_DIM, anchor="mm")
+
+    # ── Trend arrow ───────────────────────────────────────────────────
+    draw.text((cx, 100), trend_arrow, font=font_arrow, fill=color, anchor="mm")
+
+    # ── Downscale to 72x72 with antialiasing ─────────────────────────
+    img = img.resize((72, 72), Image.LANCZOS)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")

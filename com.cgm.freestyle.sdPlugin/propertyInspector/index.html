@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CGM FreeStyle</title>
+<style>
+  :root {
+    --bg: #1c1c1e; --bg2: #2c2c2e; --bg3: #3a3a3c;
+    --fg: #f2f2f2; --muted: #8e8e93;
+    --accent: #32be5a; --amber: #f0aa1e; --red: #eb5546;
+    --r: 6px; --font: "Segoe UI", -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); font: 13px var(--font); padding: 12px; min-width: 240px; }
+  h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+       color: var(--muted); margin: 16px 0 8px; }
+  h2:first-child { margin-top: 0; }
+  label { display: block; color: var(--muted); font-size: 12px; margin: 8px 0 4px; }
+  input, select { width: 100%; background: var(--bg2); color: var(--fg); border: 1px solid var(--bg3);
+                  border-radius: var(--r); padding: 6px 8px; font: inherit; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  button { width: 100%; margin-top: 10px; padding: 7px; border: 0; border-radius: var(--r);
+           background: var(--accent); color: #0b0b0b; font: 600 13px var(--font); cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 8px; }
+  .status { margin-top: 8px; padding: 6px 8px; border-radius: var(--r); background: var(--bg2);
+            font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--accent); } .dot.warn { background: var(--amber); } .dot.err { background: var(--red); }
+  .hint { color: var(--muted); font-size: 11px; margin-top: 6px; line-height: 1.4; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--fg); }
+  .check input { width: auto; }
+</style>
+</head>
+<body>
+
+<h2>Cuenta LibreLinkUp</h2>
+<label for="email">Email</label>
+<input id="email" type="email" autocomplete="off" spellcheck="false">
+<label for="password">Contraseña</label>
+<input id="password" type="password" autocomplete="off">
+<button id="saveCreds">Guardar y conectar</button>
+<div class="status"><span class="dot" id="dot"></span><span id="status">Conectando…</span></div>
+<p class="hint">La contraseña se guarda cifrada con tu usuario de Windows. Si no configuras nada aquí, se usa el archivo .env.</p>
+
+<h2>Persona</h2>
+<select id="patient"><option value="">Primera conexión</option></select>
+<p class="hint">Útil si tu cuenta sigue a varias personas: cada botón puede mostrar una distinta.</p>
+
+<h2>Unidades y rangos</h2>
+<label for="unit">Unidad</label>
+<select id="unit">
+  <option value="mgdl">mg/dL</option>
+  <option value="mmol">mmol/L</option>
+</select>
+<div class="grid">
+  <div><label for="urgent_low">Muy baja &lt;</label><input id="urgent_low" type="number" step="any"></div>
+  <div><label for="low">Baja &lt;</label><input id="low" type="number" step="any"></div>
+  <div><label for="high">Alta &gt;</label><input id="high" type="number" step="any"></div>
+  <div><label for="very_high">Muy alta &gt;</label><input id="very_high" type="number" step="any"></div>
+</div>
+<label class="check"><input id="alerts" type="checkbox"> Notificaciones de Windows</label>
+<p class="hint">Avisa en glucosa baja, bajada rápida y muy alta. En "muy baja" el botón parpadea y suena una alarma.</p>
+
+<script>
+const MGDL_PER_MMOL = 18;
+const THRESHOLDS = ["urgent_low", "low", "high", "very_high"];
+const $ = id => document.getElementById(id);
+
+let ws, context, action, actionSettings = {};
+let current = { unit: "mgdl", urgent_low: 54, low: 70, high: 180, very_high: 250, alerts: true };
+
+function connectElgatoStreamDeckSocket(port, uuid, registerEvent, info, actionInfo) {
+  const ai = JSON.parse(actionInfo);
+  context = ai.context;
+  action = ai.action;
+  actionSettings = ai.payload?.settings ?? {};
+
+  ws = new WebSocket(`ws://127.0.0.1:${port}`);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ event: registerEvent, uuid }));
+    toPlugin({ event: "getPatients" });
+  };
+  ws.onmessage = ({ data }) => {
+    const msg = JSON.parse(data);
+    if (msg.event === "didReceiveSettings") actionSettings = msg.payload?.settings ?? {};
+    if (msg.event !== "sendToPropertyInspector") return;
+    const p = msg.payload ?? {};
+    if (p.event === "state") renderState(p);
+    if (p.event === "patients") renderPatients(p.patients ?? []);
+  };
+}
+
+function toPlugin(payload) {
+  if (ws?.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ event: "sendToPlugin", action, context, payload }));
+}
+
+// Thresholds are stored in mg/dL; the inputs show the chosen unit
+const toDisplay = (mg, unit) => unit === "mmol" ? +(mg / MGDL_PER_MMOL).toFixed(1) : Math.round(mg);
+const toMgdl = (v, unit) => unit === "mmol" ? Math.round(v * MGDL_PER_MMOL) : Math.round(v);
+
+function renderState(state) {
+  if (document.activeElement !== $("email")) $("email").value = state.email ?? "";
+  $("password").placeholder = state.hasPassword ? "•••••••• (guardada)" : "";
+  current = { ...current, ...(state.settings ?? {}) };
+  $("unit").value = current.unit;
+  for (const k of THRESHOLDS)
+    if (document.activeElement !== $(k)) $(k).value = toDisplay(current[k], current.unit);
+  $("alerts").checked = !!current.alerts;
+
+  const text = state.status ?? "";
+  $("status").textContent = state.source ? `${text} · ${state.source}` : text;
+  $("dot").className = "dot " + (text === "Conectado" ? "ok" : /bloquead|Conectando/i.test(text) ? "warn" : "err");
+}
+
+function renderPatients(list) {
+  const sel = $("patient");
+  sel.innerHTML = '<option value="">Primera conexión</option>' +
+    list.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</option>`).join("");
+  sel.value = actionSettings.patientId ?? "";
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+$("saveCreds").onclick = () => {
+  const email = $("email").value.trim();
+  if (!email) { $("email").focus(); return; }
+  toPlugin({ event: "saveCredentials", email, password: $("password").value });
+  $("password").value = "";
+  $("status").textContent = "Conectando…";
+  $("dot").className = "dot warn";
+};
+
+$("patient").onchange = () => {
+  actionSettings = { ...actionSettings, patientId: $("patient").value };
+  ws?.send(JSON.stringify({ event: "setSettings", context, payload: actionSettings }));
+};
+
+function saveSettings() {
+  const unit = $("unit").value;
+  const next = { unit, alerts: $("alerts").checked };
+  for (const k of THRESHOLDS) {
+    const v = parseFloat($(k).value);
+    next[k] = Number.isFinite(v) ? toMgdl(v, unit) : current[k];
+  }
+  current = { ...current, ...next };
+  toPlugin({ event: "saveSettings", settings: current });
+}
+
+$("unit").onchange = () => {
+  // Re-display the same thresholds in the new unit instead of reinterpreting the numbers
+  current.unit = $("unit").value;
+  for (const k of THRESHOLDS) $(k).value = toDisplay(current[k], current.unit);
+  saveSettings();
+};
+for (const k of THRESHOLDS) $(k).onchange = saveSettings;
+$("alerts").onchange = saveSettings;
+</script>
+</body>
+</html>

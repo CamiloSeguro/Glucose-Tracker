@@ -4,6 +4,8 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
+
 import requests
 
 REGION_URLS = {
@@ -37,6 +39,34 @@ TREND_LABELS = {
 }
 
 
+class LibreLinkUpError(RuntimeError):
+    """Generic API failure (network, unexpected payload, server error)."""
+
+
+class AuthError(LibreLinkUpError):
+    """Credentials rejected. Retrying with the same credentials will not help."""
+
+
+class RateLimitError(LibreLinkUpError):
+    """Account temporarily locked after too many failed logins."""
+
+    def __init__(self, message: str, retry_after: int):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class TermsError(LibreLinkUpError):
+    """User must accept new terms / privacy policy in the LibreLinkUp app."""
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    # FactoryTimestamp is UTC, e.g. "9/27/2026 10:54:57 PM"
+    try:
+        return datetime.strptime(value, "%m/%d/%Y %I:%M:%S %p").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 def _decode_jwt_payload(token: str) -> dict:
     part = token.split(".")[1]
     part += "=" * (-len(part) % 4)
@@ -58,6 +88,8 @@ class LibreLinkUpClient:
         self._token: str | None = None
         self._account_id: str | None = None
         self._base_url = DEFAULT_BASE_URL
+        self._session = requests.Session()
+        self._session.headers.update(BASE_HEADERS)
         self._load_cache()
 
     # ------------------------------------------------------------------
@@ -115,42 +147,52 @@ class LibreLinkUpClient:
         except Exception:
             return True
 
-    def login(self) -> None:
-        body = {"email": self.email, "password": self.password}
-
-        # Step 1: global endpoint to discover region
-        resp = requests.post(
-            f"{DEFAULT_BASE_URL}/llu/auth/login",
-            json=body, headers=BASE_HEADERS, timeout=15
+    def _post_login(self, base_url: str) -> dict:
+        resp = self._session.post(
+            f"{base_url}/llu/auth/login",
+            json={"email": self.email, "password": self.password}, timeout=15,
         )
+        try:
+            data = resp.json()
+        except ValueError:
+            resp.raise_for_status()
+            raise LibreLinkUpError(f"Login: invalid response (HTTP {resp.status_code})")
+
+        status = data.get("status")
+        if status == 429 or resp.status_code == 429:
+            lock = data.get("data", {}).get("data", {})
+            raise RateLimitError("Account locked after failed logins", int(lock.get("lockout", 300)))
+        if status == 2:
+            msg = data.get("error", {}).get("message", "incorrect username/password")
+            raise AuthError(f"Login rejected: {msg}")
+        if status == 4:
+            raise TermsError("Open the LibreLinkUp app and accept the new terms")
         resp.raise_for_status()
-        data = resp.json()
+        return data
+
+    def login(self) -> None:
+        # Step 1: global endpoint to discover region
+        data = self._post_login(DEFAULT_BASE_URL)
 
         if data.get("data", {}).get("redirect"):
-            # Redirect can come with status=0 or status=2
             region = data["data"].get("region", "us")
-            self._base_url = REGION_URLS.get(region, DEFAULT_BASE_URL)
-        elif data.get("status") == 0:
+        elif data.get("status") == 0 and data.get("data", {}).get("authTicket"):
             token_tmp = data["data"]["authTicket"]["token"]
             region = _decode_jwt_payload(token_tmp).get("region", "us")
-            self._base_url = REGION_URLS.get(region, DEFAULT_BASE_URL)
         else:
-            raise RuntimeError(f"Login step 1 failed: {data}")
+            raise LibreLinkUpError(f"Login step 1 failed: status={data.get('status')}")
+        self._base_url = REGION_URLS.get(region, DEFAULT_BASE_URL)
 
         # Step 2: login directly on the regional endpoint
         if self._base_url != DEFAULT_BASE_URL:
-            resp = requests.post(
-                f"{self._base_url}/llu/auth/login",
-                json=body, headers=BASE_HEADERS, timeout=15
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._post_login(self._base_url)
 
-        if data.get("status") != 0:
-            raise RuntimeError(f"Login failed: {data}")
+        auth_ticket = data.get("data", {}).get("authTicket")
+        if data.get("status") != 0 or not auth_ticket:
+            raise LibreLinkUpError(f"Login failed: status={data.get('status')}")
 
         payload       = data["data"]
-        self._token   = payload["authTicket"]["token"]
+        self._token   = auth_ticket["token"]
         raw_id        = payload.get("user", {}).get("id") or payload.get("accountId")
         self._account_id = hashlib.sha256(raw_id.encode()).hexdigest() if raw_id else None
         self._save_cache()
@@ -158,7 +200,7 @@ class LibreLinkUpClient:
     def _auth_headers(self) -> dict:
         if self._is_token_expired():
             self.login()
-        headers = {**BASE_HEADERS, "Authorization": f"Bearer {self._token}"}
+        headers = {"Authorization": f"Bearer {self._token}"}
         if self._account_id:
             headers["account-id"] = self._account_id
         return headers
@@ -168,23 +210,23 @@ class LibreLinkUpClient:
     # ------------------------------------------------------------------
 
     def get_connections(self) -> list[dict]:
-        headers = self._auth_headers()
         url = f"{self._base_url}/llu/connections"
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = self._session.get(url, headers=self._auth_headers(), timeout=15)
 
         if resp.status_code in (401, 403):
             self._token = None
             self._account_id = None
             self._clear_cache()
-            headers = self._auth_headers()
             url = f"{self._base_url}/llu/connections"
-            resp = requests.get(url, headers=headers, timeout=15)
+            resp = self._session.get(url, headers=self._auth_headers(), timeout=15)
 
         resp.raise_for_status()
         data = resp.json()
 
+        if data.get("status") == 4:
+            raise TermsError("Open the LibreLinkUp app and accept the new terms")
         if data.get("status") != 0:
-            raise RuntimeError(f"Could not fetch connections: {data}")
+            raise LibreLinkUpError(f"Could not fetch connections: status={data.get('status')}")
 
         return data.get("data", [])
 
@@ -206,4 +248,5 @@ class LibreLinkUpClient:
             "is_high":     gm.get("isHigh", False),
             "is_low":      gm.get("isLow", False),
             "timestamp":   gm.get("Timestamp", ""),
+            "measured_at": _parse_timestamp(gm.get("FactoryTimestamp", "")),
         }

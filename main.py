@@ -1,14 +1,12 @@
 import argparse
-import os
 import sys
 import time
 import threading
 
-from dotenv import load_dotenv
+from src.core.env import load_env
 
 # When frozen by PyInstaller, load .env from the same folder as the exe
-_env_path = os.path.join(os.path.dirname(sys.executable if getattr(sys, "frozen", False) else __file__), ".env")
-load_dotenv(_env_path)
+load_env()
 
 from src.core.plugin import Plugin
 from src.core.timer import Timer

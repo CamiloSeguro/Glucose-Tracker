@@ -1,4 +1,5 @@
 import logging
+import logging.handlers
 import os
 import sys
 
@@ -17,6 +18,9 @@ class Logger:
         self._logger.setLevel(logging.DEBUG)
         fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
+        # Trend arrows (→, ↗) crash on a cp1252 console; degrade instead
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
         console = logging.StreamHandler(sys.stdout)
         console.setFormatter(fmt)
         self._logger.addHandler(console)
@@ -27,7 +31,10 @@ class Logger:
             else:
                 log_dir = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
             os.makedirs(log_dir, exist_ok=True)
-            fh = logging.FileHandler(os.path.join(log_dir, "plugin.log"), encoding="utf-8")
+            fh = logging.handlers.RotatingFileHandler(
+                os.path.join(log_dir, "plugin.log"),
+                maxBytes=1_000_000, backupCount=3, encoding="utf-8",
+            )
             fh.setFormatter(fmt)
             self._logger.addHandler(fh)
         except Exception:

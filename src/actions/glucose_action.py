@@ -2,11 +2,14 @@ import base64
 import io
 import os
 import threading
+import time
+from datetime import datetime, timezone
 
 from PIL import Image, ImageDraw, ImageFont
 
-from librelinkup.client import LibreLinkUpClient
+from librelinkup.client import AuthError, LibreLinkUpClient, RateLimitError, TermsError
 from src.core.action import Action
+from src.core.env import load_env
 from src.core.logger import Logger
 
 # Glucose thresholds (mg/dL)
@@ -22,6 +25,11 @@ COLOR_TEXT   = (240, 240, 240)  # off-white
 COLOR_DIM    = (120, 120, 120)  # muted gray
 
 POLL_INTERVAL_MS = 60_000  # 60 s
+
+# After the API rejects the credentials, stop hammering the login endpoint:
+# LibreLinkUp locks the account for 5 min after 3 failures.
+AUTH_RETRY_S  = 30 * 60
+STALE_AFTER_S = 15 * 60  # reading older than this is shown dimmed
 
 SIZE = 144  # render 2x, downscale for crisp result
 
@@ -95,6 +103,10 @@ class GlucoseAction(Action):
         self._client: LibreLinkUpClient | None = None
         self._timer_key: str | None = None
         self._lock = threading.Lock()
+        self._fetch_lock = threading.Lock()
+        self._retry_at = 0.0       # no automatic API calls before this time
+        self._locked_until = 0.0   # server lockout: not even a key press retries
+        self._auth_failed = False  # credentials rejected: reload .env on key press
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -102,7 +114,8 @@ class GlucoseAction(Action):
 
     def will_appear(self, settings: dict):
         self._start_client()
-        self._fetch_and_display()
+        # Don't block the WebSocket thread on the first network call
+        threading.Thread(target=self._fetch_and_display, daemon=True).start()
         self._timer_key = self.plugin.timer.set_interval(
             self._fetch_and_display, POLL_INTERVAL_MS
         )
@@ -117,7 +130,16 @@ class GlucoseAction(Action):
     # ------------------------------------------------------------------
 
     def key_up(self, payload: dict):
-        threading.Thread(target=self._fetch_and_display, daemon=True).start()
+        threading.Thread(target=self._manual_refresh, daemon=True).start()
+
+    def _manual_refresh(self):
+        if self._auth_failed:
+            # Pick up a corrected password without restarting StreamDock
+            load_env(override=True)
+            with self._lock:
+                self._client = None
+            self._start_client()
+        self._fetch_and_display(force=True)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -133,7 +155,16 @@ class GlucoseAction(Action):
             if self._client is None:
                 self._client = LibreLinkUpClient(email, password)
 
-    def _fetch_and_display(self):
+    def _fetch_and_display(self, force: bool = False):
+        # Timer and key press can overlap; the client is not thread-safe
+        if not self._fetch_lock.acquire(blocking=False):
+            return
+        try:
+            self._do_fetch(force)
+        finally:
+            self._fetch_lock.release()
+
+    def _do_fetch(self, force: bool):
         with self._lock:
             client = self._client
 
@@ -141,12 +172,35 @@ class GlucoseAction(Action):
             self._show_error("Sin config")
             return
 
+        now = time.time()
+        if now < self._locked_until or (now < self._retry_at and not force):
+            return
+
         try:
             reading = client.get_latest_glucose()
+        except AuthError as e:
+            Logger.error(f"LibreLinkUp: {e}. Fix LLU_PASSWORD in .env and press the button.")
+            self._auth_failed = True
+            self._retry_at = now + AUTH_RETRY_S
+            self._show_error("Clave mala")
+            return
+        except RateLimitError as e:
+            Logger.error(f"LibreLinkUp: {e}; retrying in {e.retry_after}s")
+            self._locked_until = now + e.retry_after + 5
+            self._show_error("Bloqueado")
+            return
+        except TermsError as e:
+            Logger.error(f"LibreLinkUp: {e}")
+            self._retry_at = now + AUTH_RETRY_S
+            self._show_error("Acepta T&C")
+            return
         except Exception as e:
             Logger.error(f"LibreLinkUp fetch error: {e}")
             self._show_error("Error API")
             return
+
+        self._auth_failed = False
+        self._retry_at = 0.0
 
         if reading is None:
             self._show_error("Sin datos")
@@ -154,12 +208,24 @@ class GlucoseAction(Action):
 
         value  = reading["value"]
         arrow  = reading["trend_arrow"]
-        color  = _glucose_color(value, reading["is_low"], reading["is_high"])
-        image  = _make_button_image(value, arrow, color)
-        self.set_image(image)
-        Logger.info(f"Glucose updated: {value} mg/dL {arrow}")
+        age_s  = _age_seconds(reading.get("measured_at"))
+        if age_s is not None and age_s > STALE_AFTER_S:
+            color = COLOR_DIM
+            title = f"hace {int(age_s // 60)}m"
+        else:
+            color = _glucose_color(value, reading["is_low"], reading["is_high"])
+            title = ""
+        self.set_image(_make_button_image(value, arrow, color))
+        self.set_title(title)
+        Logger.info(f"Glucose updated: {value} mg/dL {arrow}" + (f" ({title})" if title else ""))
 
     def _show_error(self, msg: str):
         image = _make_button_image(None, "?", COLOR_BG)
         self.set_image(image)
         self.set_title(msg)
+
+
+def _age_seconds(measured_at: datetime | None) -> float | None:
+    if measured_at is None:
+        return None
+    return (datetime.now(timezone.utc) - measured_at).total_seconds()

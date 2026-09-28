@@ -33,7 +33,7 @@ build.bat    REM instala dependencias y compila main.py con PyInstaller
 deploy.bat   REM copia el plugin compilado a la carpeta de plugins de StreamDock
 ```
 
-`build.bat` genera `com.cgm.freestyle.sdPlugin/main.exe`. `deploy.bat` lo copia a `%APPDATA%\Mirabox\StreamDock\Plugins`.
+`build.bat` genera `com.cgm.freestyle.sdPlugin/main.exe`. `deploy.bat` lo copia (junto con `.env`, si existe en la raíz) a `%APPDATA%\HotSpot\StreamDock\plugins`, o a `%APPDATA%\Mirabox\StreamDock\Plugins` en versiones antiguas de StreamDock.
 
 ## Estructura del proyecto
 
@@ -60,3 +60,10 @@ com.cgm.freestyle.sdPlugin/      Manifiesto y recursos del plugin para StreamDoc
 
 - Las credenciales y el cache de token nunca se versionan (ver `.gitignore`).
 - Si no se detectan `LLU_EMAIL` / `LLU_PASSWORD`, el botón muestra "Sin config".
+- Mensajes de error del botón:
+  - **Clave mala**: LibreLinkUp rechazó las credenciales. El plugin deja de reintentar solo (LibreLinkUp bloquea la cuenta 5 min tras 3 fallos). Corrige `.env` junto a `main.exe` y pulsa el botón: recarga el `.env` sin reiniciar StreamDock.
+  - **Bloqueado**: la cuenta está bloqueada temporalmente; el plugin espera a que termine el bloqueo.
+  - **Acepta T&C**: abre la app LibreLinkUp y acepta los nuevos términos.
+  - **Error API**: error de red o del servidor; se reintenta en el siguiente ciclo.
+- Si la última lectura tiene más de 15 min, el valor se muestra en gris con "hace Xm".
+- Los logs están en `logs/plugin.log` junto a `main.exe` (rotación a 1 MB, 3 archivos).

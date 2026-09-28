@@ -209,15 +209,15 @@ class LibreLinkUpClient:
     # Data
     # ------------------------------------------------------------------
 
-    def get_connections(self) -> list[dict]:
-        url = f"{self._base_url}/llu/connections"
+    def _get(self, path: str) -> dict | list:
+        url = f"{self._base_url}{path}"
         resp = self._session.get(url, headers=self._auth_headers(), timeout=15)
 
         if resp.status_code in (401, 403):
             self._token = None
             self._account_id = None
             self._clear_cache()
-            url = f"{self._base_url}/llu/connections"
+            url = f"{self._base_url}{path}"
             resp = self._session.get(url, headers=self._auth_headers(), timeout=15)
 
         resp.raise_for_status()
@@ -226,27 +226,77 @@ class LibreLinkUpClient:
         if data.get("status") == 4:
             raise TermsError("Open the LibreLinkUp app and accept the new terms")
         if data.get("status") != 0:
-            raise LibreLinkUpError(f"Could not fetch connections: status={data.get('status')}")
+            raise LibreLinkUpError(f"GET {path} failed: status={data.get('status')}")
 
-        return data.get("data", [])
+        return data.get("data")
 
-    def get_latest_glucose(self) -> dict | None:
-        connections = self.get_connections()
-        if not connections:
+    def get_connections(self) -> list[dict]:
+        return self._get("/llu/connections") or []
+
+    def get_patients(self) -> list[dict]:
+        """People this account follows: [{"id", "name"}]."""
+        return [
+            {"id": c.get("patientId"),
+             "name": f"{c.get('firstName', '')} {c.get('lastName', '')}".strip()}
+            for c in self.get_connections()
+        ]
+
+    def get_latest_glucose(self, patient_id: str | None = None) -> dict | None:
+        connection = _pick_connection(self.get_connections(), patient_id)
+        if connection is None:
+            return None
+        return _reading(connection.get("glucoseMeasurement"))
+
+    def get_glucose_with_history(self, patient_id: str | None = None) -> dict | None:
+        """Latest reading plus the last ~12 h of history (15-min resolution)."""
+        if patient_id is None:
+            connection = _pick_connection(self.get_connections(), None)
+            if connection is None:
+                return None
+            patient_id = connection.get("patientId")
+
+        data = self._get(f"/llu/connections/{patient_id}/graph") or {}
+        connection = data.get("connection") or {}
+        current = _reading(connection.get("glucoseMeasurement"))
+        if current is None:
             return None
 
-        gm = connections[0].get("glucoseMeasurement")
-        if not gm:
-            return None
+        history = []
+        for point in data.get("graphData") or []:
+            at    = _parse_timestamp(point.get("FactoryTimestamp", ""))
+            value = point.get("ValueInMgPerDl")
+            if at is not None and value is not None:
+                history.append((at, value))
+        history.sort()
 
-        trend = gm.get("TrendArrow", 4)
-        return {
-            "value":       gm.get("Value") or gm.get("ValueInMgPerDl"),
-            "trend":       trend,
-            "trend_arrow": TREND_ARROWS.get(trend, "→"),
-            "trend_label": TREND_LABELS.get(trend, "Estable"),
-            "is_high":     gm.get("isHigh", False),
-            "is_low":      gm.get("isLow", False),
-            "timestamp":   gm.get("Timestamp", ""),
-            "measured_at": _parse_timestamp(gm.get("FactoryTimestamp", "")),
-        }
+        current["patient_id"]   = patient_id
+        current["patient_name"] = connection.get("firstName", "")
+        current["history"]      = history
+        return current
+
+
+def _pick_connection(connections: list[dict], patient_id: str | None) -> dict | None:
+    if not connections:
+        return None
+    if patient_id:
+        for c in connections:
+            if c.get("patientId") == patient_id:
+                return c
+    return connections[0]
+
+
+def _reading(gm: dict | None) -> dict | None:
+    if not gm:
+        return None
+    trend = gm.get("TrendArrow", 4)
+    return {
+        # "Value" is in the account's display unit (mg/dL or mmol/L); always use mg/dL
+        "value":       gm.get("ValueInMgPerDl") or gm.get("Value"),
+        "trend":       trend,
+        "trend_arrow": TREND_ARROWS.get(trend, "→"),
+        "trend_label": TREND_LABELS.get(trend, "Estable"),
+        "is_high":     gm.get("isHigh", False),
+        "is_low":      gm.get("isLow", False),
+        "timestamp":   gm.get("Timestamp", ""),
+        "measured_at": _parse_timestamp(gm.get("FactoryTimestamp", "")),
+    }

@@ -16,6 +16,7 @@ class Plugin:
         self._actions: dict[str, object] = {}
         self._factory = ActionFactory()
         self._on_close_cb = None
+        self._global_listeners = []
 
     # ------------------------------------------------------------------
     # Public control
@@ -49,6 +50,9 @@ class Plugin:
                 "context": self.plugin_uuid,
                 "payload": payload,
             }))
+
+    def add_global_settings_listener(self, callback):
+        self._global_listeners.append(callback)
 
     def get_global_settings(self):
         if self.ws:
@@ -117,9 +121,17 @@ class Plugin:
 
         elif event == "didReceiveGlobalSettings":
             settings = payload.get("settings", {})
+            for callback in self._global_listeners:
+                callback(settings)
             for inst in self._actions.values():
                 if hasattr(inst, "did_receive_global_settings"):
                     inst.did_receive_global_settings(settings)
+
+        elif event in ("propertyInspectorDidAppear", "propertyInspectorDidDisappear"):
+            inst = self._actions.get(context)
+            method = self._camel_to_snake(event)
+            if inst and hasattr(inst, method):
+                getattr(inst, method)(payload)
 
         elif event == "sendToPlugin":
             inst = self._actions.get(context)
